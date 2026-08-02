@@ -1,0 +1,632 @@
+# AH Collection Of Clothes — Full Stack Store
+
+Your site now has a real backend. Here's what changed and how to run it.
+
+## What was added
+- *server.js* — Node.js + Express server with API routes:
+  - GET /api/products — list products (from data/products.json)
+  - GET /api/cart — get current cart (tracked via cookie, no login needed)
+  - POST /api/cart/add — add item to cart
+  - POST /api/cart/remove — remove item from cart
+  - POST /api/checkout — place an order (saves to data/orders.json)
+  - POST /api/newsletter — save email signups (data/newsletter.json)
+- *public/index.html* — same design as before, but products, cart, and checkout now talk to the backend instead of being fake/static.
+- *data/* — JSON files acting as a simple database (products, orders, carts, newsletter emails). Good enough to start; swap for a real database (SQLite/Postgres) later if you grow.
+
+## How to run it locally
+1. Install [Node.js](https://nodejs.org) if you don't have it.
+2. Open a terminal in this folder and run:
+   
+   npm install
+   npm start
+   
+3. Open http://localhost:3000 in your browser.
+
+## What's still missing (important)
+- *Real payments are not connected.* Checkout right now just records the order as pending_payment — no money actually moves. To take real payments, you'll need a processor like *Stripe* or *PayPal*, which needs a business/merchant account. I can wire this in when you're ready.
+- *No admin panel yet* — right now you'd check data/orders.json directly to see orders. I can build a simple admin page to view/manage orders and stock.
+- *Not deployed yet* — this runs on your own computer for now. To make it live on the internet, deploy it to something like *Render* or *Railway* (both have free tiers), and I can walk you through that step by step.
+
+## Notes
+- Cart is tied to a browser cookie, so each visitor gets their own cart automatically.
+- Stock numbers in data/products.json are for display only right now — they don't yet auto-decrease when someone orders. Say the word and I'll add that.
+/ AH Collection Of Clothes — backend server
+// Simple Node.js + Express backend: products, cart, orders, newsletter signups.
+// Data is stored in JSON files under /data (swap for a real database later if you want).
+
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const { randomUUID } = require('crypto');
+const cookieParser = require('cookie-parser');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const DATA_DIR = path.join(__dirname, 'data');
+const PRODUCTS_FILE = path.join(DATA_DIR, 'products.json');
+const ORDERS_FILE = path.join(DATA_DIR, 'orders.json');
+const NEWSLETTER_FILE = path.join(DATA_DIR, 'newsletter.json');
+const CARTS_FILE = path.join(DATA_DIR, 'carts.json');
+
+function readJSON(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+function writeJSON(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+// ---------- seed products if missing ----------
+if (!fs.existsSync(PRODUCTS_FILE)) {
+  writeJSON(PRODUCTS_FILE, [
+    { id: 'AH-014', name: 'Oversized Hoodie — Concrete', price: 128, tag: 'New', stock: 24 },
+    { id: 'AH-021', name: 'Cargo Utility Pants', price: 142, tag: null, stock: 18 },
+    { id: 'AH-007', name: 'Boxy Tee — Off White', price: 54, tag: 'Restock', stock: 40 },
+    { id: 'AH-030', name: 'Coach Bomber Jacket', price: 198, tag: null, stock: 10 },
+    { id: 'AH-002', name: 'Structured Cap — Hazard', price: 42, tag: 'Low Stock', stock: 5 },
+    { id: 'AH-018', name: 'Quarter-Zip Fleece', price: 118, tag: null, stock: 15 }
+  ]);
+}
+if (!fs.existsSync(ORDERS_FILE)) writeJSON(ORDERS_FILE, []);
+if (!fs.existsSync(NEWSLETTER_FILE)) writeJSON(NEWSLETTER_FILE, []);
+if (!fs.existsSync(CARTS_FILE)) writeJSON(CARTS_FILE, {});
+
+app.use(express.json());
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ---------- cart identity via cookie ----------
+app.use((req, res, next) => {
+  let cartId = req.cookies.cart_id;
+  if (!cartId) {
+    cartId = randomUUID();
+    res.cookie('cart_id', cartId, { httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 });
+  }
+  req.cartId = cartId;
+  next();
+});
+
+// ---------- PRODUCTS ----------
+app.get('/api/products', (req, res) => {
+  res.json(readJSON(PRODUCTS_FILE, []));
+});
+
+// ---------- CART ----------
+app.get('/api/cart', (req, res) => {
+  const carts = readJSON(CARTS_FILE, {});
+  const cart = carts[req.cartId] || [];
+  const products = readJSON(PRODUCTS_FILE, []);
+  const items = cart.map(line => {
+    const p = products.find(p => p.id === line.id);
+    return p ? { ...p, qty: line.qty } : null;
+  }).filter(Boolean);
+  const total = items.reduce((sum, i) => sum + i.price * i.qty, 0);
+  res.json({ items, total: Number(total.toFixed(2)) });
+});
+
+app.post('/api/cart/add', (req, res) => {
+  const { id, qty } = req.body;
+  const quantity = Math.max(1, parseInt(qty) || 1);
+  const products = readJSON(PRODUCTS_FILE, []);
+  const product = products.find(p => p.id === id);
+  if (!product) return res.status(404).json({ error: 'Product not found' });
+
+  const carts = readJSON(CARTS_FILE, {});
+  const cart = carts[req.cartId] || [];
+  const existing = cart.find(line => line.id === id);
+  if (existing) existing.qty += quantity;
+  else cart.push({ id, qty: quantity });
+  carts[req.cartId] = cart;
+  writeJSON(CARTS_FILE, carts);
+  res.json({ ok: true });
+});
+
+app.post('/api/cart/remove', (req, res) => {
+  const { id } = req.body;
+  const carts = readJSON(CARTS_FILE, {});
+  carts[req.cartId] = (carts[req.cartId] || []).filter(line => line.id !== id);
+  writeJSON(CARTS_FILE, carts);
+  res.json({ ok: true });
+});
+
+// ---------- CHECKOUT (stub — wire up Stripe/PayPal here later) ----------
+app.post('/api/checkout', (req, res) => {
+  const { email, name, address } = req.body;
+  if (!email || !name || !address) {
+    return res.status(400).json({ error: 'Name, email, and address are required.' });
+  }
+  const carts = readJSON(CARTS_FILE, {});
+  const cart = carts[req.cartId] || [];
+  if (cart.length === 0) return res.status(400).json({ error: 'Cart is empty.' });
+
+  const products = readJSON(PRODUCTS_FILE, []);
+  const items = cart.map(line => {
+    const p = products.find(p => p.id === line.id);
+    return { id: line.id, name: p?.name, price: p?.price, qty: line.qty };
+  });
+  const total = items.reduce((sum, i) => sum + (i.price || 0) * i.qty, 0);
+
+  const order = {
+    orderId: randomUUID(),
+    email, name, address,
+    items, total: Number(total.toFixed(2)),
+    status: 'pending_payment', // no real payment processor is wired up yet
+    createdAt: new Date().toISOString()
+  };
+
+  const orders = readJSON(ORDERS_FILE, []);
+  orders.push(order);
+  writeJSON(ORDERS_FILE, orders);
+
+  // clear cart
+  carts[req.cartId] = [];
+  writeJSON(CARTS_FILE, carts);
+
+  res.json({ ok: true, orderId: order.orderId, total: order.total });
+});
+
+// ---------- NEWSLETTER ----------
+app.post('/api/newsletter', (req, res) => {
+  const { email } = req.body;
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+    return res.status(400).json({ error: 'Valid email required.' });
+  }
+  const list = readJSON(NEWSLETTER_FILE, []);
+  if (!list.includes(email)) {
+    list.push(email);
+    writeJSON(NEWSLETTER_FILE, list);
+  }
+  res.json({ ok: true });
+});
+
+app.listen(PORT, () => {
+  console.log(AH Collection server running at http://localhost:${PORT});
+});
+{
+  "name": "ah-collection-store",
+  "version": "1.0.0",
+  "description": "AH Collection Of Clothes — full-stack store (frontend + backend)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cookie-parser": "^1.4.6"
+  }
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AH Collection Of Clothes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0E0E0F;
+    --ink-2:#161616;
+    --paper:#EDE9E0;
+    --stone:#B9B2A2;
+    --stone-dim:#6E695E;
+    --hazard:#FFD100;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    background:var(--ink);
+    color:var(--paper);
+    font-family:'Inter',sans-serif;
+    overflow-x:hidden;
+  }
+  ::selection{background:var(--hazard);color:var(--ink);}
+
+  .mono{
+    font-family:'JetBrains Mono',monospace;
+    text-transform:uppercase;
+    letter-spacing:0.12em;
+  }
+
+  .grain{
+    position:fixed;inset:0;
+    pointer-events:none;
+    z-index:999;
+    opacity:0.05;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  nav{
+    position:sticky;top:0;z-index:100;
+    display:flex;align-items:center;justify-content:space-between;
+    padding:22px 5vw;
+    background:rgba(14,14,15,0.85);
+    backdrop-filter:blur(6px);
+    border-bottom:1px solid rgba(185,178,162,0.15);
+  }
+  .logo-mark{
+    font-family:'Anton',sans-serif;
+    font-size:1.6rem;
+    letter-spacing:0.02em;
+    display:flex;align-items:center;gap:10px;
+  }
+  .logo-mark .dot{width:8px;height:8px;background:var(--hazard);border-radius:1px;display:inline-block;}
+  .nav-links{display:flex;gap:2.4rem;font-size:0.72rem;align-items:center;}
+  .nav-links a{color:var(--stone);text-decoration:none;position:relative;transition:color .2s;}
+  .nav-links a:hover{color:var(--paper);}
+  .nav-links a:focus-visible, button:focus-visible{outline:2px solid var(--hazard);outline-offset:3px;}
+  .nav-links a::after{
+    content:"";position:absolute;left:0;bottom:-6px;width:0;height:1px;background:var(--hazard);transition:width .25s;
+  }
+  .nav-links a:hover::after{width:100%;}
+  #cart-btn{
+    background:none;border:1px solid var(--stone-dim);color:var(--paper);
+    padding:8px 14px;font-family:'JetBrains Mono',monospace;font-size:0.7rem;cursor:pointer;
+    display:flex;align-items:center;gap:8px;
+  }
+  #cart-btn:hover{border-color:var(--hazard);}
+  #cart-count{background:var(--hazard);color:var(--ink);padding:1px 7px;border-radius:10px;font-size:0.68rem;}
+
+  .hazard-strip{
+    height:34px;width:100%;
+    background:repeating-linear-gradient(-45deg, var(--hazard) 0 22px, var(--ink-2) 22px 44px);
+    background-size:200% 100%;
+    animation:slide 14s linear infinite;
+  }
+  @keyframes slide{from{background-position-x:0;}to{background-position-x:-400px;}}
+
+  .hero{
+    min-height:92vh;display:flex;flex-direction:column;justify-content:center;
+    padding:8vh 5vw 6vh;position:relative;
+  }
+  .drop-tag{
+    display:inline-flex;align-items:center;gap:10px;font-size:0.72rem;color:var(--hazard);
+    margin-bottom:2rem;opacity:0;animation:fadeUp .7s ease forwards;
+  }
+  .drop-tag::before{content:"";width:8px;height:8px;background:var(--hazard);animation:pulse 1.6s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.25;}}
+  .hero h1{
+    font-family:'Anton',sans-serif;text-transform:uppercase;line-height:0.86;
+    font-size:clamp(3.2rem,11vw,9.5rem);letter-spacing:-0.01em;
+  }
+  .hero h1 span{display:block;opacity:0;animation:fadeUp .8s ease forwards;}
+  .hero h1 span:nth-child(1){animation-delay:.05s;}
+  .hero h1 span:nth-child(2){animation-delay:.18s; color:transparent; -webkit-text-stroke:1.5px var(--paper);}
+  .hero h1 span:nth-child(3){animation-delay:.3s;}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(24px);}to{opacity:1;transform:translateY(0);}}
+  .hero-sub{max-width:480px;margin-top:2.2rem;color:var(--stone);font-size:1rem;line-height:1.6;opacity:0;animation:fadeUp .8s ease forwards;animation-delay:.45s;}
+  .hero-actions{margin-top:2.6rem;display:flex;gap:1rem;align-items:center;opacity:0;animation:fadeUp .8s ease forwards;animation-delay:.55s;}
+  .btn{
+    font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:0.1em;font-size:0.75rem;
+    padding:16px 28px;background:var(--paper);color:var(--ink);border:1px solid var(--paper);
+    cursor:pointer;text-decoration:none;transition:background .2s,color .2s;
+  }
+  .btn:hover{background:transparent;color:var(--paper);}
+  .btn-ghost{background:transparent;color:var(--paper);border:1px solid var(--stone-dim);}
+  .btn-ghost:hover{border-color:var(--paper);}
+  .hero-index{position:absolute;right:5vw;bottom:6vh;font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--stone-dim);text-align:right;line-height:1.8;display:none;}
+  @media(min-width:800px){.hero-index{display:block;}}
+
+  section{padding:7rem 5vw;}
+  .section-head{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:3.5rem;flex-wrap:wrap;gap:1rem;}
+  .section-head h2{font-family:'Anton',sans-serif;font-size:clamp(2.2rem,5vw,3.6rem);text-transform:uppercase;line-height:0.95;}
+  .eyebrow{color:var(--hazard);font-size:0.72rem;margin-bottom:0.8rem;display:block;}
+  .section-note{max-width:300px;color:var(--stone);font-size:0.9rem;line-height:1.6;}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1px;background:rgba(185,178,162,0.15);}
+  .card{background:var(--ink);padding:2.2rem 1.8rem 1.8rem;display:flex;flex-direction:column;position:relative;transition:transform .35s ease, background .35s ease;}
+  .card:hover{transform:translateY(-6px);background:var(--ink-2);}
+  .card-tag{position:absolute;top:1.2rem;right:1.2rem;font-size:0.62rem;color:var(--ink);background:var(--hazard);padding:3px 8px;}
+  .card svg{width:100%;height:150px;stroke:var(--stone);margin-bottom:1.6rem;}
+  .card:hover svg{stroke:var(--paper);transition:stroke .3s;}
+  .card-code{font-size:0.65rem;color:var(--stone-dim);margin-bottom:0.4rem;}
+  .card-name{font-size:1.05rem;margin-bottom:0.5rem;font-weight:500;}
+  .card-price{font-family:'JetBrains Mono',monospace;color:var(--stone);font-size:0.85rem;margin-bottom:1rem;}
+  .card-stock{font-size:0.65rem;color:var(--stone-dim);margin-bottom:1rem;}
+  .add-btn{
+    font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:0.08em;font-size:0.68rem;
+    padding:10px;background:transparent;border:1px solid var(--stone-dim);color:var(--paper);cursor:pointer;
+    transition:border-color .2s, background .2s;
+  }
+  .add-btn:hover{border-color:var(--hazard);background:rgba(255,209,0,0.08);}
+  .add-btn:disabled{opacity:0.4;cursor:not-allowed;}
+
+  .manifesto{display:grid;grid-template-columns:1fr 1fr;gap:4rem;align-items:start;}
+  @media(max-width:800px){.manifesto{grid-template-columns:1fr;}}
+  .manifesto p{font-size:1.5rem;line-height:1.5;font-weight:500;}
+  .manifesto p + p{margin-top:1.6rem;color:var(--stone);font-size:1rem;font-weight:400;line-height:1.7;}
+  .stat-row{display:flex;gap:3rem;margin-top:2.5rem;flex-wrap:wrap;}
+  .stat{font-family:'JetBrains Mono',monospace;}
+  .stat b{display:block;font-family:'Anton',sans-serif;font-size:2rem;color:var(--hazard);}
+  .stat span{font-size:0.65rem;color:var(--stone);}
+
+  .lookbook{padding-left:0;padding-right:0;}
+  .lookbook .section-head{padding:0 5vw;}
+  .strip{display:flex;gap:1px;overflow-x:auto;background:rgba(185,178,162,0.15);scrollbar-width:thin;}
+  .frame{
+    min-width:280px;height:380px;background:var(--ink);flex-shrink:0;position:relative;
+    display:flex;align-items:flex-end;padding:1.4rem;
+    background-image:linear-gradient(180deg, rgba(14,14,15,0) 40%, rgba(14,14,15,0.9) 100%),
+      repeating-linear-gradient(120deg, #1b1b1c 0 3px, #141414 3px 7px);
+  }
+  .frame span{font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--stone);}
+
+  .cta-block{text-align:center;padding:8rem 5vw;}
+  .cta-block h2{font-family:'Anton',sans-serif;font-size:clamp(2.4rem,7vw,5rem);text-transform:uppercase;margin-bottom:2rem;line-height:0.95;}
+  .signup{display:flex;max-width:480px;margin:0 auto;border:1px solid var(--stone-dim);}
+  .signup input{flex:1;background:transparent;border:none;color:var(--paper);padding:1rem 1.2rem;font-family:'JetBrains Mono',monospace;font-size:0.8rem;}
+  .signup input:focus{outline:none;}
+  .signup input::placeholder{color:var(--stone-dim);}
+  .signup button{background:var(--hazard);color:var(--ink);border:none;font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;padding:0 1.6rem;cursor:pointer;}
+  .form-msg{margin-top:1rem;font-size:0.72rem;color:var(--stone);min-height:1em;}
+
+  footer{border-top:1px solid rgba(185,178,162,0.15);padding:3rem 5vw;display:flex;justify-content:space-between;flex-wrap:wrap;gap:2rem;font-size:0.75rem;color:var(--stone-dim);}
+  footer .cols{display:flex;gap:4rem;flex-wrap:wrap;}
+  footer .col h4{color:var(--paper);font-size:0.68rem;margin-bottom:0.9rem;}
+  footer .col a{display:block;color:var(--stone-dim);text-decoration:none;margin-bottom:0.5rem;}
+  footer .col a:hover{color:var(--paper);}
+
+  @media(max-width:700px){.nav-links a:not(#cart-btn){display:none;}}
+  @media (prefers-reduced-motion: reduce){*{animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition:none !important;}}
+
+  /* ---------- cart drawer ---------- */
+  #cart-overlay{
+    position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;
+    display:none;
+  }
+  #cart-drawer{
+    position:fixed;top:0;right:0;height:100%;width:min(420px,92vw);
+    background:var(--ink-2);border-left:1px solid rgba(185,178,162,0.2);
+    z-index:201;transform:translateX(100%);transition:transform .3s ease;
+    display:flex;flex-direction:column;
+  }
+  #cart-drawer.open{transform:translateX(0);}
+  #cart-overlay.open{display:block;}
+  .cart-head{display:flex;justify-content:space-between;align-items:center;padding:1.4rem;border-bottom:1px solid rgba(185,178,162,0.15);}
+  .cart-head h3{font-family:'Anton',sans-serif;text-transform:uppercase;font-size:1.4rem;}
+  #close-cart{background:none;border:none;color:var(--paper);font-size:1.4rem;cursor:pointer;}
+  #cart-items{flex:1;overflow-y:auto;padding:1rem 1.4rem;}
+  .cart-line{display:flex;justify-content:space-between;align-items:center;padding:0.9rem 0;border-bottom:1px solid rgba(185,178,162,0.08);gap:0.6rem;}
+  .cart-line-name{font-size:0.9rem;}
+  .cart-line-meta{font-size:0.7rem;color:var(--stone-dim);margin-top:2px;}
+  .cart-line-remove{background:none;border:none;color:var(--stone-dim);cursor:pointer;font-size:0.9rem;}
+  .cart-line-remove:hover{color:var(--hazard);}
+  .cart-empty{color:var(--stone-dim);font-size:0.85rem;text-align:center;margin-top:2rem;}
+  .cart-footer{padding:1.4rem;border-top:1px solid rgba(185,178,162,0.15);}
+  .cart-total{display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;margin-bottom:1rem;font-size:0.9rem;}
+  #checkout-btn{width:100%;}
+
+  /* ---------- checkout modal ---------- */
+  #checkout-overlay{
+    position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:300;display:none;
+    align-items:center;justify-content:center;padding:1.4rem;
+  }
+  #checkout-overlay.open{display:flex;}
+  #checkout-modal{
+    background:var(--ink-2);border:1px solid rgba(185,178,162,0.2);
+    max-width:420px;width:100%;padding:2rem;
+  }
+  #checkout-modal h3{font-family:'Anton',sans-serif;text-transform:uppercase;font-size:1.5rem;margin-bottom:1.4rem;}
+  #checkout-modal label{display:block;font-size:0.68rem;color:var(--stone);margin-bottom:0.4rem;margin-top:1rem;}
+  #checkout-modal input, #checkout-modal textarea{
+    width:100%;background:var(--ink);border:1px solid var(--stone-dim);color:var(--paper);
+    padding:0.8rem;font-family:'Inter',sans-serif;font-size:0.85rem;
+  }
+  #checkout-modal textarea{resize:vertical;min-height:60px;}
+  #checkout-modal .btn{margin-top:1.6rem;width:100%;}
+  #checkout-msg{margin-top:1rem;font-size:0.78rem;color:var(--stone);}
+</style>
+</head>
+<body>
+
+<div class="grain"></div>
+
+<nav>
+  <div class="logo-mark">AH<span class="dot"></span></div>
+  <div class="nav-links">
+    <a href="#collection">Collection</a>
+    <a href="#manifesto">Manifesto</a>
+    <a href="#lookbook">Lookbook</a>
+    <a href="#join">Join</a>
+    <button id="cart-btn" aria-label="Open cart">Cart <span id="cart-count">0</span></button>
+  </div>
+</nav>
+
+<div class="hazard-strip" role="presentation"></div>
+
+<header class="hero">
+  <div class="drop-tag mono">Drop 004 — SS26 — Limited Run</div>
+  <h1>
+    <span>AH</span>
+    <span>Collection</span>
+    <span>Of Clothes</span>
+  </h1>
+  <p class="hero-sub">Built for the block, not the boardroom. Heavyweight fabrics, utility cuts, and pieces made to take a beating and look better for it.</p>
+  <div class="hero-actions">
+    <a href="#collection" class="btn">Shop The Drop</a>
+    <a href="#manifesto" class="btn btn-ghost">Our Story</a>
+  </div>
+  <div class="hero-index mono">
+    01 — Collection<br>02 — Manifesto<br>03 — Lookbook<br>04 — Join The List
+  </div>
+</header>
+
+<div class="hazard-strip" role="presentation"></div>
+
+<section id="collection">
+  <div class="section-head">
+    <div>
+      <span class="eyebrow mono">Featured Pieces</span>
+      <h2>The Lineup</h2>
+    </div>
+    <p class="section-note">Six pieces, zero filler. Each cut in-house and produced in short runs — once it's gone, it's gone.</p>
+  </div>
+  <div class="grid" id="product-grid">
+    <!-- products injected by JS from /api/products -->
+  </div>
+</section>
+
+<div class="hazard-strip" role="presentation"></div>
+
+<section id="manifesto">
+  <div class="manifesto">
+    <div>
+      <span class="eyebrow mono">The Manifesto</span>
+      <p>AH Collection Of Clothes was built in a garage, not a studio.</p>
+    </div>
+    <div>
+      <p>We make clothes for people who move — through the city, through the grind, through whatever the day throws down. Heavyweight cotton, reinforced seams, cuts that fit real bodies doing real things.</p>
+      <p style="margin-top:1.2rem;">No seasonal filler, no fast-fashion turnaround. Every drop is small, every piece is made to be worn until it earns its wrinkles.</p>
+      <div class="stat-row">
+        <div class="stat"><b>04</b><span>Drops released</span></div>
+        <div class="stat"><b>420g</b><span>Heavyweight cotton</span></div>
+        <div class="stat"><b>Ltd</b><span>Run per style</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="hazard-strip" role="presentation"></div>
+
+<section id="lookbook" class="lookbook">
+  <div class="section-head">
+    <div>
+      <span class="eyebrow mono">SS26 Lookbook</span>
+      <h2>On The Block</h2>
+    </div>
+  </div>
+  <div class="strip">
+    <div class="frame"><span class="mono">Look 01 — Concrete</span></div>
+    <div class="frame"><span class="mono">Look 02 — Loading Dock</span></div>
+    <div class="frame"><span class="mono">Look 03 — Overpass</span></div>
+    <div class="frame"><span class="mono">Look 04 — Corner Store</span></div>
+    <div class="frame"><span class="mono">Look 05 — Night Shift</span></div>
+  </div>
+</section>
+
+<div class="hazard-strip" role="presentation"></div>
+
+<section id="join" class="cta-block">
+  <span class="eyebrow mono">Stay Looped In</span>
+  <h2>Get Drop Alerts</h2>
+  <form class="signup" id="signup-form">
+    <input type="email" id="newsletter-email" placeholder="your@email.com" required aria-label="Email address">
+    <button type="submit">Notify Me</button>
+  </form>
+  <div class="form-msg mono" id="form-msg"></div>
+</section>
+
+<footer>
+  <div class="logo-mark">AH<span class="dot"></span></div>
+  <div class="cols">
+    <div class="col">
+      <h4 class="mono">Shop</h4>
+      <a href="#collection">Collection</a>
+      <a href="#lookbook">Lookbook</a>
+    </div>
+    <div class="col">
+      <h4 class="mono">Brand</h4>
+      <a href="#manifesto">Manifesto</a>
+      <a href="#join">Newsletter</a>
+    </div>
+    <div class="col">
+      <h4 class="mono">Connect</h4>
+      <a href="#">Instagram</a>
+      <a href="#">Contact</a>
+    </div>
+  </div>
+  <div class="mono">© 2026 AH Collection Of Clothes</div>
+</footer>
+
+<!-- Cart Drawer -->
+<div id="cart-overlay"></div>
+<aside id="cart-drawer">
+  <div class="cart-head">
+    <h3>Your Cart</h3>
+    <button id="close-cart" aria-label="Close cart">&times;</button>
+  </div>
+  <div id="cart-items"></div>
+  <div class="cart-footer">
+    <div class="cart-total"><span>Total</span><span id="cart-total-val">$0.00</span></div>
+    <button class="btn" id="checkout-btn">Checkout</button>
+  </div>
+</aside>
+
+<!-- Checkout Modal -->
+<div id="checkout-overlay">
+  <div id="checkout-modal">
+    <h3>Checkout</h3>
+    <form id="checkout-form">
+      <label for="co-name">Full name</label>
+      <input type="text" id="co-name" required>
+      <label for="co-email">Email</label>
+      <input type="email" id="co-email" required>
+      <label for="co-address">Shipping address</label>
+      <textarea id="co-address" required></textarea>
+      <button type="submit" class="btn">Place Order</button>
+    </form>
+    <div id="checkout-msg"></div>
+  </div>
+</div>
+
+<script>
+const grid = document.getElementById('product-grid');
+const cartCount = document.getElementById('cart-count');
+const cartItemsEl = document.getElementById('cart-items');
+const cartTotalEl = document.getElementById('cart-total-val');
+
+const icons = {
+  'AH-014': '<path d="M30 20 L20 30 L25 45 L32 40 L32 85 L68 85 L68 40 L75 45 L80 30 L70 20 L60 26 L40 26 Z"/><circle cx="50" cy="30" r="4"/>',
+  'AH-021': '<path d="M35 15 H65 V35 L58 90 H52 L50 55 L48 90 H42 L35 35 Z"/><path d="M35 30 H65"/>',
+  'AH-007': '<path d="M25 30 L45 20 H55 L75 30 L70 45 L60 40 V85 H40 V40 L30 45 Z"/>',
+  'AH-030': '<path d="M22 40 L30 22 H70 L78 40 L70 48 L65 38 V85 H35 V38 L30 48 Z"/><path d="M40 22 V30 H60 V22"/>',
+  'AH-002': '<path d="M20 55 A30 25 0 0 1 80 55 Z"/><path d="M20 55 H80"/><path d="M78 55 L92 58"/>',
+  'AH-018': '<path d="M28 25 L20 35 L28 45 L34 38 V88 H66 V38 L72 45 L80 35 L72 25 L60 32 H40 Z"/>'
+};
+
+async function loadProducts(){
+  const res = await fetch('/api/products');
+  const products = await res.json();
+  grid.innerHTML = products.map(p => `
+    <div class="card">
+      ${p.tag ? `<span class="card-tag mono">${p.tag}</span>` : ''}
+      <svg viewBox="0 0 100 100" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${icons[p.id] || ''}</svg>
+      <div class="card-code mono">${p.id}</div>
+      <div class="card-name">${p.name}</div>
+      <div class="card-price">$${p.price}</div>
+      <div class="card-stock mono">${p.stock > 0 ? p.stock + ' in stock' : 'Sold out'}</div>
+      <button class="add-btn mono" data-id="${p.id}" ${p.stock === 0 ? 'disabled' : ''}>Add to cart</button>
+    </div>
+  `).join('');
+
+  grid.querySelectorAll('.add-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await fetch('/api/cart/add', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ id: btn.dataset.id, qty: 1 })
+      });
+      loadCart();
+      openCart();
+    });
+  });
+}
+
+async function loadCart(){
+  const res = await fetch('/api/cart');
+  const data = await res.json();
+  cartCount.textContent = data.items.reduce((s,i)=>s+i.qty,0);
+  cartTotalEl.textContent = '$' + data.total.toFixed(2);
+  if (data.items.length === 0){
+    cartItemsEl.innerHTML = '<p class="cart-empty">Your cart is empty.</p>';
+    return;
+  }
+  cartItemsEl.innerHTML = data.items.map(i => `
+    <div class="cart-line">
+      <div>
+        <div class="cart-line-name">${i.name}</div>
+        <div class="cart-line-meta mono">${i.qty} × $${i.price}</div>
